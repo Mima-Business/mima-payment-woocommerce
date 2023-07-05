@@ -1,7 +1,20 @@
 <?php
 
-class WC_Gateway_Mima extends WC_Payment_Gateway
-{
+
+/**
+ * Mima Payment Gateway class. Handles processing payments via Mima
+ */
+class WC_Gateway_Mima extends WC_Payment_Gateway {
+	/**
+	 * Mima Production API base url
+	 */
+	public const MIMA_API = 'https://api.trymima.com/v1';
+
+	/**
+	 * Mima Test API base url
+	 */
+	public const MIMA_TEST_API = 'https://api.dev.trymima.com/v1';
+
     /**
      * Is test mode active?
      *
@@ -16,8 +29,17 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
      */
     public $public_key;
 
-    public function __construct()
-    {
+	/**
+     * Mima secret key.
+     *
+     * @var string
+     */
+    public $secret_key;
+
+	/**
+	 * Constructor
+	 */
+	public function __construct() {
         $this->id = 'mima';
         $this->method_title = __('Mima Payment Gateway', 'woo-mima');
         $this->method_description = "Mima Payment Gateway.";
@@ -28,24 +50,18 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
         $this->init_settings();
 
         $this->public_key = $this->get_option('public_key');
+        $this->secret_key = $this->get_option('secret_key');
+        $this->testmode = $this->get_option('testmode', 'no');
 
         add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
-        add_action('rest_api_init', array($this, 'register_webhook_endpoint'));
-
-        // Handle the webhook callback
-        add_action('woocommerce_api_mima_webhook', array($this, 'handle_webhook_request'));
-    }
-    public function register_webhook_endpoint()
-    {
-        register_rest_route('mima/v1', '/webhook', array(
-            'methods' => 'POST',
-            'callback' => array($this, 'handle_webhook_request'),
-            'permission_callback' => '__return_true',
-        ));
     }
 
-    public function init_form_fields()
-    {
+	/**
+	 * Mima Admin settings fields.
+	 *
+	 * @return void
+	 */
+	public function init_form_fields() {
         $this->form_fields = array(
             'enabled' => array(
                 'title' => 'Enable/Disable',
@@ -59,6 +75,12 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
                 'label' => 'Enter your mima business public key.',
                 'default' => ''
             ),
+            'secret_key' => array(
+                'title' => 'Secret Key',
+                'type' => 'password',
+                'label' => 'Enter your mima business secret key.',
+                'default' => ''
+            ),
             'testmode' => array(
                 'title'       => __('Test mode', 'woo-mima'),
                 'label'       => __('Enable Test Mode', 'woo-mima'),
@@ -70,8 +92,14 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
         );
     }
 
-    public function process_payment($order_id)
-    {
+	/**
+	 * Process Mima Payment
+	 *
+	 * @param $order_id
+	 *
+	 * @return array|string[]
+	 */
+	public function process_payment($order_id) {
         global $woocommerce;
 
         $order = wc_get_order($order_id);
@@ -119,39 +147,32 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
             'customer' => $customer,
             'invoice' => $invoice,
             'publicKey' => $this->get_option('public_key'),
+	        'callBackUrl' => get_site_url(null, '/') . '?wc-ajax=' . WC_MIMA_WEBHOOK_VERSION
         );
 
         // Encode payload as JSON
         $payload_json = json_encode($payload);
 
-        // External payment provider URL
-	    $test_mode = $this->get_option('testmode', 'no');
-		if ($test_mode === 'no') {
-			$payment_url = 'https://api.trymima.com/v1/invoices/checkout';
-		} else {
-            $payment_url = 'https://api.dev.trymima.com/v1/invoices/checkout';
+		if ($this->testmode) {
+            update_post_meta($order_id, '_mima_test', $this->testmode);
 		}
-
-        // Generate a unique token for identifying the transaction
-        $token = md5(uniqid());
-
-        // Save the token in the order for later verification
-        update_post_meta($order_id, '_mima_payment_gateway_token', $token);
 
         // Perform the POST request to the payment provider URL
         $args = array(
             'body' => $payload_json,
-            'headers' => array('Content-Type' => 'application/json'),
+            'headers' => [
+				'Content-Type' => 'application/json',
+				'publicKey' => $this->public_key,
+            ],
             'timeout' => 30,
             'redirection' => 5,
             'blocking' => true,
             'sslverify' => true, // Only use for testing purposes. Use true in production.
         );
 
-        $response = wp_remote_post($payment_url, $args);
+        $response = wp_remote_post($this->get_mima_url('/invoices/checkout'), $args);
 
         if (!is_wp_error($response) && 200 === wp_remote_retrieve_response_code($response)) {
-	        $order->update_status('processing', __('Payment accepted via Mima payment gateway.', 'woo-mima'));
             $response_data = json_decode(wp_remote_retrieve_body($response));
 			return [
 				'result' => 'success',
@@ -164,6 +185,24 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
         );
     }
 
+	/**
+	 * Get Mima API base URL.
+	 *
+	 * @param string $path
+	 *
+	 * @return string
+	 */
+	private function get_mima_url(string $path): string {
+		$base = $this->testmode === 'no'
+			? self::MIMA_API
+			: self::MIMA_TEST_API;
+
+		return $base . $path;
+	}
+
+	/**
+	 * @return mixed|string|null
+	 */
 	public function get_icon() {
 		$icon = '<img src="' . WC_HTTPS::force_https_url(
 			plugins_url('assets/images/logo.png', WC_MIMA_MAIN_FILE)
@@ -171,39 +210,94 @@ class WC_Gateway_Mima extends WC_Payment_Gateway
 		return apply_filters( 'woocommerce_gateway_icon', $icon, $this->id );
 	}
 
-	public function handle_webhook_request($request)
-    {
-        // Process the webhook payload
-        $payload = json_decode($request->get_body(), true);
+	/**
+	 * Process incoming webhook
+	 *
+	 * @param $signature
+	 * @param $payload
+	 *
+	 * @return array
+	 */
+	public function process_webhook($signature, $payload): array {
+		if ($signature === hash_hmac('sha512', $payload, $this->secret_key, false)) {
+			$data = json_decode($payload, true);
 
-        // Get the order ID from the payload (assuming the order ID is included in the webhook payload)
-        $order_id = $payload['orderId'];
+			if (!empty($data['reference'])) {
+				$reference = sanitize_text_field($data['reference']);
+				$this->process_transaction($reference);
+			}
+		}
 
-        // Retrieve the order
-        $order = wc_get_order($order_id);
+		// Response send doesn't matter as it's not consumed.
+		return [
+			'status' => true,
+			'message' => 'Webhook processed',
+		];
+	}
 
-        // Check if the order exists
-        if ($order) {
-            // Update the order status based on the webhook payload
-            $status = $payload['status'];
+	/**
+	 * Process a Mima transaction.
+	 *
+	 * @param $reference
+	 * @param $schedule_retry
+	 *
+	 * @return void
+	 */
+	public function process_transaction( $reference, $schedule_retry = true ) {
+		$reference_details = $this->get_reference_details($reference);
 
-            // Handle different status values as needed
-            if ($status === 'paid') {
-                // Payment is successful
-                $order->update_status('completed', __('Payment accepted via Mima payment gateway.', 'woo-mima'));
-            } elseif ($status === 'failed') {
-                // Payment failed
-                $order->update_status('failed', __('Payment failed via Mima payment gateway.', 'woo-mima'));
-            }
+		if ($reference_details['status'] === 'unavailable' && $schedule_retry) {
+			// Verification service unavailable. Retry verification in an hour
+			wp_schedule_single_event(time() + 3600, 'mima_retry_transaction', [$reference]);
+			return;
+		}
 
-            // Save any additional data from the webhook payload to order notes or metadata
-            // ...
+		if (in_array($reference_details['status'], ['success', 'failed'])) {
+			$order = wc_get_order((int)$reference_details['orderId']);
 
-            // Return a response to the webhook request
-            return new WP_REST_Response('Webhook received successfully.', 200);
-        }
+			if (
+				!$order // Order not found
+				|| $order->get_status() !== 'pending' // Only process pending orders
+			) {
+				return;
+			}
 
-        // If the order is not found, return an error response
-        return new WP_Error('order_not_found', __('Order not found.', 'woo-mima'), array('status' => 404));
-    }
+			if ($reference_details['status'] === 'success') {
+				$order->payment_complete($reference);
+				$order->add_order_note("Order payment received by Mima Payment (Reference: $reference)");
+				return;
+			}
+
+			$order->update_status('failed', "Order payment failed by Mima Payment");
+		}
+	}
+
+	/**
+	 * @param string $reference
+	 *
+	 * @return string[]
+	 */
+	private function get_reference_details(string $reference): array {
+		$result = wp_remote_get(
+			$this->get_mima_url("/banking/plugin/verify-order/$reference"),
+			[
+				'headers' => [
+					'mimaSignature' => hash_hmac('sha512', $reference, $this->secret_key, false),
+				],
+			]
+		);
+
+		if (!empty($result['body'])) {
+			$body = json_decode($result['body'], true);
+
+			if (!is_null($body) && !empty($body['status']) && !empty($body['orderId'])) {
+				return $body;
+			}
+		}
+
+		// Can not decode response | No response found
+		return [
+			'status' => 'unavailable',
+		];
+	}
 }
