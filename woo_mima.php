@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Plugin Name: Mima WooCommerce Payment Gateway
+ * Plugin Name: MimaPay WooCommerce Payment Gateway
  * Plugin URI: https://trymima.com
  * Description: WooCommerce payment gateway for Mima
  * Version: 5.7.6
